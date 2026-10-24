@@ -8,16 +8,17 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+def _metric_col(results: pd.DataFrame, prefix: str) -> str:
+    """Name of the first column starting with *prefix* (e.g. ``"NDCG@"``)."""
+    for c in results.columns:
+        if c.startswith(prefix):
+            return c
+    raise ValueError(f"No {prefix} column found")
+
+
 def best_per_family(results: pd.DataFrame, ndcg_col: str | None = None) -> pd.DataFrame:
     """Return one row per *model_class* with the highest NDCG."""
-    if ndcg_col is None:
-        for c in results.columns:
-            if c.startswith("NDCG@"):
-                ndcg_col = c
-                break
-        if ndcg_col is None:
-            raise ValueError("No NDCG column found")
-
+    ndcg_col = ndcg_col or _metric_col(results, "NDCG@")
     idx = results.groupby("model_class")[ndcg_col].idxmax()
     return results.loc[idx].reset_index(drop=True)
 
@@ -32,16 +33,9 @@ def plot_best_per_family(
 
     Returns the path to the saved PNG.
     """
-    if ndcg_col is None:
-        for c in results.columns:
-            if c.startswith("NDCG@"):
-                ndcg_col = c
-                break
-        if ndcg_col is None:
-            raise ValueError("No NDCG column found")
-
-    prec_col = next(c for c in results.columns if c.startswith("Precision@"))
-    rec_col = next(c for c in results.columns if c.startswith("Recall@"))
+    ndcg_col = ndcg_col or _metric_col(results, "NDCG@")
+    prec_col = _metric_col(results, "Precision@")
+    rec_col = _metric_col(results, "Recall@")
 
     best = best_per_family(results, ndcg_col=ndcg_col)
     best = best.sort_values(ndcg_col, ascending=True)

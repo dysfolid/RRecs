@@ -1,11 +1,21 @@
 from recs.base import Recommender
-from recs.models.belief_propagation import BeliefPropagationRec
-from recs.models.bipartite_graph import BipartiteGraphRec
-from recs.models.weighted_similarity import WeightedSimilarity
+from recs.models import (
+    BeliefPropagationRec,
+    BipartiteGraphRec,
+    ItemCFBaseline,
+    MostPopularBaseline,
+    SVDBaseline,
+    UserCFBaseline,
+    WeightedSimilarity,
+)
 
 __all__ = [
     "BeliefPropagationRec",
     "BipartiteGraphRec",
+    "ItemCFBaseline",
+    "MostPopularBaseline",
     "Recommender",
+    "SVDBaseline",
+    "UserCFBaseline",
     "WeightedSimilarity",
 ]

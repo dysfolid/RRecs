@@ -14,44 +14,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from tqdm import tqdm
 
 from recs.base import Recommender
-
-
-def _sparse_topk_rows(
-    mat: sparse.csr_matrix,
-    top_k: int,
-    *,
-    show_progress: bool = False,
-) -> sparse.csr_matrix:
-    """Keep the *top_k* largest values per row (CSR)."""
-    mat = mat.tocsr()
-    n = mat.shape[0]
-    if top_k >= mat.shape[1]:
-        return mat.astype(np.float32)
-
-    rows, cols, vals = [], [], []
-    it = range(n)
-    if show_progress:
-        it = tqdm(it, total=n, desc="BP fit: top-k S", unit="item")
-    for i in it:
-        row_start, row_end = mat.indptr[i], mat.indptr[i + 1]
-        row_data = mat.data[row_start:row_end]
-        row_indices = mat.indices[row_start:row_end]
-        if len(row_data) <= top_k:
-            rows.extend([i] * len(row_data))
-            cols.extend(row_indices)
-            vals.extend(row_data)
-        else:
-            top_idx = np.argpartition(row_data, -top_k)[-top_k:]
-            rows.extend([i] * top_k)
-            cols.extend(row_indices[top_idx])
-            vals.extend(row_data[top_idx])
-
-    return sparse.csr_matrix(
-        (vals, (rows, cols)), shape=mat.shape, dtype=np.float32
-    )
+from recs.matrix import sparse_topk
 
 
 def _symmetrize_max(S: sparse.csr_matrix) -> sparse.csr_matrix:
@@ -167,9 +132,11 @@ class BeliefPropagationRec(Recommender):
         Maximum item nodes in the subgraph built around a user’s basket
         (for latency).
     show_progress : bool
-        If ``True``, show tqdm bars on the *fit* top-k pass and the *recommend*
-        per-customer loop.
+        If ``True``, show a tqdm bar over customers during *recommend*.
     """
+
+    # BP runs per customer, so small batches keep the progress bar moving.
+    recommend_batch_size = 32
 
     def __init__(
         self,
@@ -187,98 +154,24 @@ class BeliefPropagationRec(Recommender):
         self.max_subgraph_nodes = max_subgraph_nodes
         self.show_progress = show_progress
 
-        self._customer_idx: pd.Index | None = None
-        self._product_idx: pd.Index | None = None
         self._S: sparse.csr_matrix | None = None
-        self._interactions: sparse.csr_matrix | None = None
 
-    def fit(
+    def _fit(
         self,
         customers: pd.DataFrame,
         products: pd.DataFrame,
         interactions: pd.DataFrame,
-    ) -> BeliefPropagationRec:
-        self._customer_idx = pd.Index(customers["customer_id"].values)
-        self._product_idx = pd.Index(products["product_id"].values)
-
-        n = len(self._customer_idx)
-        m = len(self._product_idx)
-
-        row = self._customer_idx.get_indexer(interactions["customer_id"])
-        col = self._product_idx.get_indexer(interactions["product_id"])
-        weights = interactions["weight"].values.astype(np.float32)
-        I = sparse.csr_matrix((weights, (row, col)), shape=(n, m))  # noqa: E741
-        self._interactions = I
-
-        raw = I.T @ I
-        raw = raw.tocsr()
-        raw.setdiag(0)
-        raw.eliminate_zeros()
-        S = _sparse_topk_rows(raw, self.top_k, show_progress=self.show_progress)
+    ) -> None:
+        I = self._interactions  # noqa: E741
+        S = sparse_topk(I.T @ I, self.top_k, zero_diag=True)
         self._S = _symmetrize_max(S).tocsr()
 
-        return self
-
-    def recommend(
-        self,
-        customer_ids: list | pd.Index | None = None,
-        n: int = 10,
-        exclude_seen: bool = True,
-    ) -> pd.DataFrame:
-        if self._S is None or self._interactions is None:
-            raise RuntimeError("Model has not been fitted yet. Call fit() first.")
-
-        S = self._S
-        I = self._interactions
-
-        if customer_ids is None:
-            customer_ids = self._customer_idx
-        customer_ids = pd.Index(customer_ids)
-
-        idx = self._customer_idx.get_indexer(customer_ids)
-        if (idx == -1).any():
-            unknown = customer_ids[idx == -1].tolist()
-            raise KeyError(f"Unknown customer_ids: {unknown}")
-
-        rows: list[dict] = []
-        m = S.shape[0]
-
-        it = zip(idx, customer_ids)
-        if self.show_progress:
-            it = tqdm(
-                it,
-                total=len(customer_ids),
-                desc="BP recommend",
-                unit="user",
-            )
-        for pos, cid in it:
-            scores = self._scores_for_user(I.getrow(pos), S, m)
-
-            if exclude_seen:
-                seen = I[pos].nonzero()[1]
-                scores[seen] = 0.0
-
-            if n < len(scores):
-                top = np.argpartition(scores, -n)[-n:]
-                top = top[np.argsort(scores[top])[::-1]]
-            else:
-                top = np.argsort(scores)[::-1][:n]
-
-            for rank, pidx in enumerate(top, 1):
-                if scores[pidx] <= 0:
-                    break
-                rows.append(
-                    {
-                        "customer_id": cid,
-                        "product_id": self._product_idx[pidx],
-                        "score": float(scores[pidx]),
-                        "rank": rank,
-                    }
-                )
-
-        return pd.DataFrame(
-            rows, columns=["customer_id", "product_id", "score", "rank"]
-        )
+    def _score(self, positions: np.ndarray) -> np.ndarray:
+        m = self._S.shape[0]
+        return np.vstack([
+            self._scores_for_user(self._interactions.getrow(pos), self._S, m)
+            for pos in positions
+        ])
 
     def _scores_for_user(
         self,

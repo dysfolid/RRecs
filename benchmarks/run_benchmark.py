@@ -13,16 +13,19 @@ Requires matplotlib for the summary plot (``pip install matplotlib``).
 
 from __future__ import annotations
 
-from benchmarks.baselines import (
-    ItemCFBaseline,
-    MostPopularBaseline,
-    SVDBaseline,
-    UserCFBaseline,
-)
 from benchmarks.datasets import load_online_retail
 from benchmarks.plotting import plot_best_per_family
 from benchmarks.runner import run_sweep
-from recs import BipartiteGraphRec, WeightedSimilarity, BeliefPropagationRec
+from recs import (
+    BeliefPropagationRec,  # noqa: F401  (BP configs are commented out below)
+    BipartiteGraphRec,
+    ItemCFBaseline,
+    MostPopularBaseline,
+    Recommender,
+    SVDBaseline,
+    UserCFBaseline,
+    WeightedSimilarity,
+)
 
 K = 10
 
@@ -35,9 +38,20 @@ GRAPH_3HOP_COUNT_K = [75, 100, 125, 150, 175, 200, 250]  # extend past 150; anch
 GRAPH_3HOP_MULT_K = [30, 50, 100]  # multiply underperforms; few reference points
 
 
-def build_configs() -> list[tuple[str, object]]:
+def _ws_interactions_only(**kwargs) -> WeightedSimilarity:
+    """WeightedSimilarity using only the two interaction-similarity matrices."""
+    return WeightedSimilarity(
+        w_product_metadata=0,
+        w_product_interactions=1,
+        w_customer_metadata=0,
+        w_customer_interactions=1,
+        **kwargs,
+    )
+
+
+def build_configs() -> list[tuple[str, Recommender]]:
     """Return (name, model) pairs for the benchmark sweep."""
-    configs: list[tuple[str, object]] = []
+    configs: list[tuple[str, Recommender]] = []
 
     # ---- Classic baselines ----
     configs.append(("Popular", MostPopularBaseline()))
@@ -47,44 +61,18 @@ def build_configs() -> list[tuple[str, object]]:
     for n_comp in [20, 50, 80]:
         configs.append((f"SVD n={n_comp}", SVDBaseline(n_components=n_comp)))
 
-    # ---- WeightedSimilarity: overlap, fine top_k in 10–50 ----
-    for top_k in WS_OVERLAP_K:
+    # ---- WeightedSimilarity: overlap, fine top_k in 10–50, then the tail ----
+    for top_k in WS_OVERLAP_K + WS_OVERLAP_K_TAIL:
         configs.append((
             f"WS overlap k={top_k}",
-            WeightedSimilarity(
-                w_product_metadata=0,
-                w_product_interactions=1,
-                w_customer_metadata=0,
-                w_customer_interactions=1,
-                metric="overlap",
-                top_k=top_k,
-            ),
-        ))
-    for top_k in WS_OVERLAP_K_TAIL:
-        configs.append((
-            f"WS overlap k={top_k}",
-            WeightedSimilarity(
-                w_product_metadata=0,
-                w_product_interactions=1,
-                w_customer_metadata=0,
-                w_customer_interactions=1,
-                metric="overlap",
-                top_k=top_k,
-            ),
+            _ws_interactions_only(metric="overlap", top_k=top_k),
         ))
 
     # ---- WeightedSimilarity: cosine (sparse reference only) ----
     for top_k in WS_COSINE_K:
         configs.append((
             f"WS cosine k={top_k}",
-            WeightedSimilarity(
-                w_product_metadata=0,
-                w_product_interactions=1,
-                w_customer_metadata=0,
-                w_customer_interactions=1,
-                metric="cosine",
-                top_k=top_k,
-            ),
+            _ws_interactions_only(metric="cosine", top_k=top_k),
         ))
 
     # ---- WeightedSimilarity: small metadata blend (overlap) ----
@@ -105,15 +93,8 @@ def build_configs() -> list[tuple[str, object]]:
     for k_ic, k_ip in [(25, 100), (30, 100), (40, 120), (50, 100), (50, 150)]:
         configs.append((
             f"WS ovl k_ic={k_ic} k_ip={k_ip}",
-            WeightedSimilarity(
-                w_product_metadata=0,
-                w_product_interactions=1,
-                w_customer_metadata=0,
-                w_customer_interactions=1,
-                metric="overlap",
-                top_k=50,
-                top_k_icsm=k_ic,
-                top_k_ipsm=k_ip,
+            _ws_interactions_only(
+                metric="overlap", top_k=50, top_k_icsm=k_ic, top_k_ipsm=k_ip,
             ),
         ))
 

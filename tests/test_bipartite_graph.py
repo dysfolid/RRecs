@@ -6,40 +6,6 @@ from recs.models.bipartite_graph import BipartiteGraphRec
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-def _make_data(n_customers=100, n_products=50, n_interactions=500, seed=42):
-    rng = np.random.default_rng(seed)
-
-    customers = pd.DataFrame({
-        "customer_id": [f"c{i}" for i in range(n_customers)],
-        "region": rng.choice(["north", "south", "east", "west"], n_customers),
-        "segment": rng.choice(["budget", "mid", "premium"], n_customers),
-    })
-
-    products = pd.DataFrame({
-        "product_id": [f"p{i}" for i in range(n_products)],
-        "category": rng.choice(["catA", "catB", "catC", "catD"], n_products),
-    })
-
-    cids = rng.choice(customers["customer_id"].values, n_interactions)
-    pids = rng.choice(products["product_id"].values, n_interactions)
-    interactions = pd.DataFrame({
-        "customer_id": cids,
-        "product_id": pids,
-        "weight": rng.uniform(0.1, 5.0, n_interactions).round(2),
-    }).drop_duplicates(subset=["customer_id", "product_id"])
-
-    return customers, products, interactions
-
-
-@pytest.fixture()
-def data():
-    return _make_data()
-
-
-# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -184,6 +150,20 @@ class TestStrictGroups:
         # This mainly tests that it runs without error
         recs = model.recommend(n=10)
         assert isinstance(recs, pd.DataFrame)
+
+    def test_strict_group_equals_zero_penalty(self, data):
+        """A strict group is the same as a 0-penalty on that column."""
+        customers, products, interactions = data
+        grouped = BipartiteGraphRec(
+            hop_weights={3: 1.0}, top_k=20, customer_group_cols=["region"],
+        ).fit(customers, products, interactions)
+        penalised = BipartiteGraphRec(
+            hop_weights={3: 1.0}, top_k=20, customer_penalties={"region": 0.0},
+        ).fit(customers, products, interactions)
+
+        pd.testing.assert_frame_equal(
+            grouped.recommend(n=10), penalised.recommend(n=10)
+        )
 
 
 class TestSoftPenalties:
