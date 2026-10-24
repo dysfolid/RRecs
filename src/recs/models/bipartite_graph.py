@@ -42,18 +42,11 @@ class BipartiteGraphRec(Recommender):
     customer_group_cols : list[str] | None
         Columns defining strict customer groups.  Paths cannot
         traverse customers from different groups.
-    product_group_cols : list[str] | None
-        Columns defining strict product groups.  **Currently has no
-        effect**: scoring only uses the customer matrix C, so product-side
-        constraints are never applied.
     customer_penalties : dict[str, float] | float | None
         Soft penalties for crossing customer feature boundaries.
         A dict maps feature columns to penalty factors (0-1).
         A single float applies the same penalty to every metadata
         column.  ``None`` disables penalties.
-    product_penalties : dict[str, float] | float | None
-        Same as *customer_penalties* but for products.  **Currently has no
-        effect** (see *product_group_cols*).
     cold_start_n : int | None
         If set, customers with **no** interactions get recommendations by
         pretending their basket is the top-*cold_start_n* products by
@@ -63,6 +56,10 @@ class BipartiteGraphRec(Recommender):
         entries are treated like real ones for *exclude_seen*.  Only hop
         keys **1** and **3** from *hop_weights* contribute to the cold-start
         score (5/7-hop terms are skipped for that user).
+    hop_normalization : ``"none"`` | ``"row"``
+        ``"row"`` scales each hop's scores to sum to 1 per customer before
+        weighting, so *hop_weights* set each hop's share instead of being
+        swamped by the much larger path counts of longer hops.
     """
 
     def __init__(
@@ -71,19 +68,17 @@ class BipartiteGraphRec(Recommender):
         aggregation: Literal["multiply", "count"] = "multiply",
         top_k: int = 100,
         customer_group_cols: list[str] | None = None,
-        product_group_cols: list[str] | None = None,
         customer_penalties: dict[str, float] | float | None = None,
-        product_penalties: dict[str, float] | float | None = None,
         cold_start_n: int | None = None,
+        hop_normalization: Literal["none", "row"] = "none",
     ) -> None:
         self.hop_weights = hop_weights or {3: 1.0, 5: 0.3}
         self.aggregation = aggregation
         self.top_k = top_k
         self.customer_group_cols = customer_group_cols
-        self.product_group_cols = product_group_cols
         self.customer_penalties = customer_penalties
-        self.product_penalties = product_penalties
         self.cold_start_n = cold_start_n
+        self.hop_normalization = hop_normalization
 
         self._I_graph: sparse.csr_matrix | None = None
         self._cold_baskets: sparse.csr_matrix | None = None
@@ -97,6 +92,11 @@ class BipartiteGraphRec(Recommender):
         if aggregation not in ("multiply", "count"):
             raise ValueError(
                 f"aggregation must be 'multiply' or 'count', got {aggregation!r}"
+            )
+
+        if hop_normalization not in ("none", "row"):
+            raise ValueError(
+                f"hop_normalization must be 'none' or 'row', got {hop_normalization!r}"
             )
 
     # ------------------------------------------------------------------
@@ -132,7 +132,7 @@ class BipartiteGraphRec(Recommender):
         for k, w in self.hop_weights.items():
             if w:
                 c_exp = (k - 1) // 2
-                R = R + w * (I if c_exp == 0 else c_powers[c_exp] @ I)
+                R = R + w * self._normalize_hop(I if c_exp == 0 else c_powers[c_exp] @ I)
         self._R = R
 
         self._cold_baskets = (
@@ -225,10 +225,20 @@ class BipartiteGraphRec(Recommender):
         scores = np.zeros(baskets.shape, dtype=np.float64)
         hw = self.hop_weights
         if hw.get(1):
-            scores += float(hw[1]) * baskets.toarray()
+            scores += float(hw[1]) * self._normalize_hop(baskets).toarray()
         if hw.get(3):
-            scores += float(hw[3]) * ((baskets @ I_g.T) @ I_g).toarray()
+            hop3 = self._normalize_hop((baskets @ I_g.T) @ I_g)
+            scores += float(hw[3]) * hop3.toarray()
         return scores.astype(np.float32)
+
+    def _normalize_hop(self, R_k: sparse.csr_matrix) -> sparse.csr_matrix:
+        """Apply *hop_normalization* to one hop's (customer x product) scores."""
+        if self.hop_normalization == "none":
+            return R_k
+        totals = np.asarray(R_k.sum(axis=1)).ravel()
+        inv = np.divide(1.0, totals, out=np.zeros_like(totals, dtype=np.float64),
+                        where=totals != 0)
+        return (sparse.diags(inv) @ R_k).astype(np.float32).tocsr()
 
 
 # ======================================================================

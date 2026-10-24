@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 
 import pandas as pd
@@ -44,6 +45,8 @@ def run_config(
 
     metrics = evaluate(
         recs_dict, data.ground_truth, data.eval_customers, k=k,
+        item_popularity=data.train.groupby("product_id")["customer_id"].nunique().to_dict(),
+        n_items=len(data.products),
     )
 
     params = _extract_params(model)
@@ -62,6 +65,7 @@ def run_sweep(
     data: BenchmarkData,
     k: int = 10,
     output_path: str | None = None,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """Run a list of ``(name, model)`` configs and return a results DataFrame.
 
@@ -76,6 +80,9 @@ def run_sweep(
     output_path : str | None
         If given, save results to a timestamped CSV in this directory (or
         exact file path if it ends with ``.csv``).
+    n_jobs : int
+        Configs evaluated in parallel worker processes (timings then
+        include some contention between workers).
 
     Returns
     -------
@@ -84,26 +91,37 @@ def run_sweep(
     """
     rows: list[dict] = []
     total = len(configs)
+    ndcg_key = f"NDCG@{k}"
 
-    for i, (name, model) in enumerate(configs, 1):
-        print(f"  [{i}/{total}] {name} …", end=" ", flush=True)
-        result = run_config(model, data, k=k)
+    def report(i: int, name: str, result: dict) -> None:
         result["name"] = name
         rows.append(result)
-        ndcg_key = f"NDCG@{k}"
         print(
-            f"NDCG={result[ndcg_key]:.4f}  "
+            f"  [{i}/{total}] {name} … NDCG={result[ndcg_key]:.4f}  "
             f"fit={result['fit_time_s']:.1f}s  "
-            f"rec={result['recommend_time_s']:.1f}s"
+            f"rec={result['recommend_time_s']:.1f}s",
+            flush=True,
         )
+
+    if n_jobs > 1:
+        with ProcessPoolExecutor(
+            n_jobs, initializer=_set_worker_data, initargs=(data,)
+        ) as pool:
+            futures = [pool.submit(_run_in_worker, model, k) for _, model in configs]
+            for i, ((name, _), future) in enumerate(zip(configs, futures), 1):
+                report(i, name, future.result())
+    else:
+        for i, (name, model) in enumerate(configs, 1):
+            report(i, name, run_config(model, data, k=k))
 
     df = pd.DataFrame(rows)
     col_order = [
         "name", f"Precision@{k}", f"Recall@{k}", f"NDCG@{k}",
+        f"Coverage@{k}", f"AvgPop@{k}",
         "fit_time_s", "recommend_time_s", "model_class", "params_json",
     ]
     df = df[[c for c in col_order if c in df.columns]]
-    df = df.sort_values(f"NDCG@{k}", ascending=False).reset_index(drop=True)
+    df = df.sort_values(ndcg_key, ascending=False).reset_index(drop=True)
 
     if output_path is not None:
         csv_path = _resolve_output_path(output_path)
@@ -114,9 +132,55 @@ def run_sweep(
     return df
 
 
+def select_and_test(
+    configs: list[tuple[str, Recommender]],
+    data: BenchmarkData,
+    k: int = 10,
+    output_dir: str | None = None,
+    n_jobs: int = 1,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Model selection on the validation split, then one test run per model.
+
+    Every config is scored on ``data.validation``; the best config of each
+    model class (by NDCG@K) is refitted on the full training data and scored
+    on the test split.  Returns ``(validation_results, test_results)``.
+    """
+    if data.validation is None:
+        raise ValueError("data has no validation split")
+
+    print(f"Validation sweep ({data.validation.name}): {len(configs)} configs")
+    val = run_sweep(
+        configs, data.validation, k=k, n_jobs=n_jobs,
+        output_path=None if output_dir is None else os.path.join(output_dir, "validation.csv"),
+    )
+
+    winners = val.loc[val.groupby("model_class")[f"NDCG@{k}"].idxmax(), "name"]
+    by_name = dict(configs)
+    chosen = [(name, by_name[name]) for name in winners]
+
+    print(f"\nTest run ({data.name}): best config per model class")
+    test = run_sweep(
+        chosen, data, k=k, n_jobs=n_jobs,
+        output_path=None if output_dir is None else os.path.join(output_dir, "test.csv"),
+    )
+    return val, test
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+_WORKER_DATA: BenchmarkData | None = None
+
+
+def _set_worker_data(data: BenchmarkData) -> None:
+    global _WORKER_DATA
+    _WORKER_DATA = data
+
+
+def _run_in_worker(model: Recommender, k: int) -> dict:
+    return run_config(model, _WORKER_DATA, k=k)
+
 
 def _extract_params(model: Recommender) -> dict:
     """Pull constructor parameters from a model instance.

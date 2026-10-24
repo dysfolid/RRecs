@@ -1,7 +1,8 @@
 """Dataset loaders for benchmarking.
 
 Each loader returns a :class:`BenchmarkData` instance containing the
-train/test split and metadata tables ready for model consumption.
+train/test split and metadata tables ready for model consumption, plus a
+nested validation split carved out of the training data for model selection.
 """
 
 from __future__ import annotations
@@ -24,25 +25,32 @@ class BenchmarkData:
     ground_truth: dict[str, set]  # customer_id -> {test product_ids}
     eval_customers: list[str]     # customers present in both train and test
     name: str = ""                # dataset identifier
+    # Same tables, with `train` split again by time into train / validation.
+    # Tune hyperparameters here; report on the outer test split once.
+    validation: BenchmarkData | None = None
 
 
 def load_online_retail(
     data_dir: str = "benchmarks/data",
     min_interactions: int = 5,
     test_frac: float = 0.2,
+    val_frac: float = 0.2,
 ) -> BenchmarkData:
     """Download, clean, and split the UCI Online Retail dataset.
 
     Parameters
     ----------
     data_dir : str
-        Directory to cache the downloaded xlsx file.
+        Directory to cache the downloaded xlsx file (and a parsed pickle).
     min_interactions : int
         Minimum distinct products per customer (and vice-versa) after
         iterative filtering.
     test_frac : float
         Fraction of each customer's interactions (by time) held out for
         testing.
+    val_frac : float
+        Fraction of each customer's remaining training interactions (by
+        time) held out as the validation split (``data.validation``).
     """
     os.makedirs(data_dir, exist_ok=True)
     xlsx_path = os.path.join(data_dir, "Online Retail.xlsx")
@@ -57,7 +65,7 @@ def load_online_retail(
         os.remove(zip_path)
         print("Done.")
 
-    raw = pd.read_excel(xlsx_path, engine="openpyxl")
+    raw = _read_excel_cached(xlsx_path)
 
     # ---- Cleaning ----
     df = raw.copy()
@@ -112,37 +120,78 @@ def load_online_retail(
         columns={"StockCode": "product_id"}
     )
 
-    # ---- Time-based train / test split ----
-    interactions_dated = interactions_full.sort_values("last_date")
+    # ---- Time-based train / test split, then train / validation ----
+    train_df, test_df = _split_by_time(
+        interactions_full.sort_values("last_date"), test_frac
+    )
+    # train_df keeps each customer's rows in time order, so no re-sort.
+    fit_df, val_df = _split_by_time(train_df, val_frac)
+
+    data = _benchmark_data(customers, products, train_df, test_df, "online_retail")
+    data.validation = _benchmark_data(
+        customers, products, fit_df, val_df, "online_retail/validation"
+    )
+
+    for split in (data, data.validation):
+        print(
+            f"{split.name}: {len(customers)} customers, {len(products)} products, "
+            f"{len(split.train)} train, "
+            f"{sum(len(s) for s in split.ground_truth.values())} held out, "
+            f"{len(split.eval_customers)} eval"
+        )
+    return data
+
+
+def _read_excel_cached(xlsx_path: str) -> pd.DataFrame:
+    """``pd.read_excel`` with a pickle cache next to the file (parsing is slow)."""
+    cache_path = os.path.splitext(xlsx_path)[0] + ".pkl"
+    if os.path.exists(cache_path) and (
+        os.path.getmtime(cache_path) >= os.path.getmtime(xlsx_path)
+    ):
+        return pd.read_pickle(cache_path)
+    raw = pd.read_excel(xlsx_path, engine="openpyxl")
+    raw.to_pickle(cache_path)
+    return raw
+
+
+def _split_by_time(
+    dated: pd.DataFrame,
+    holdout_frac: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hold out the last *holdout_frac* of each customer's rows.
+
+    *dated* must already be in time order within each customer.  Every
+    customer keeps at least one row on the training side.
+    """
     train_rows, test_rows = [], []
-    for _, grp in interactions_dated.groupby("CustomerID"):
+    for _, grp in dated.groupby("CustomerID"):
         n = len(grp)
-        split = max(1, int(n * (1 - test_frac)))
+        split = max(1, int(n * (1 - holdout_frac)))
         train_rows.append(grp.iloc[:split])
         if split < n:
             test_rows.append(grp.iloc[split:])
+    return (
+        pd.concat(train_rows).reset_index(drop=True),
+        pd.concat(test_rows).reset_index(drop=True),
+    )
 
-    train_df = pd.concat(train_rows).reset_index(drop=True)
-    test_df = pd.concat(test_rows).reset_index(drop=True)
 
+def _benchmark_data(
+    customers: pd.DataFrame,
+    products: pd.DataFrame,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    name: str,
+) -> BenchmarkData:
     train = train_df[["CustomerID", "StockCode", "weight"]].rename(
         columns={"CustomerID": "customer_id", "StockCode": "product_id"}
     )
-    ground_truth = (
-        test_df.groupby("CustomerID")["StockCode"].apply(set).to_dict()
-    )
-    eval_customers = sorted(ground_truth.keys())
-
-    print(
-        f"Online Retail: {len(customers)} customers, {len(products)} products, "
-        f"{len(train)} train, {len(test_df)} test, {len(eval_customers)} eval"
-    )
-
+    ground_truth = test_df.groupby("CustomerID")["StockCode"].apply(set).to_dict()
     return BenchmarkData(
         customers=customers,
         products=products,
         train=train,
         ground_truth=ground_truth,
-        eval_customers=eval_customers,
-        name="online_retail",
+        eval_customers=sorted(ground_truth.keys()),
+        name=name,
     )

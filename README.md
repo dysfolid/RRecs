@@ -63,6 +63,7 @@ src/recs/
     weighted_similarity.py  WeightedSimilarity
     bipartite_graph.py      BipartiteGraphRec
     belief_propagation.py   BeliefPropagationRec
+    item_based.py           ItemKNNRec, EASERec, RP3BetaRec
     baselines.py            MostPopular / UserCF / ItemCF / SVD baselines
 benchmarks/        dataset loader, metrics, sweep runner, plotting
 notebooks/         demo + exploratory benchmark notebooks
@@ -75,7 +76,10 @@ tests/
 |-------|--------|
 | `WeightedSimilarity` | `R = (c·CSM + d·ICSM) @ I @ (a·PSM + b·IPSM)` |
 | `BipartiteGraphRec` | `R = Σ w_k · C^((k-1)/2) @ I` over odd hop counts *k*, with `C = I Iᵀ` |
-| `BeliefPropagationRec` | marginals of loopy BP on the item co-occurrence graph `IᵀI` |
+| `BeliefPropagationRec` | beliefs of loopy BP on the item co-occurrence graph (vectorised; see its docstring for the coupling / evidence / prior / potential options) |
+| `ItemKNNRec` | basket @ top-k shared-buyer similarity (asymmetric cosine, shrinkage) |
+| `EASERec` | basket @ closed-form linear item model (Steck, 2019) |
+| `RP3BetaRec` | basket @ popularity-penalised 3-step random walk (Paudel et al., 2016) |
 | `MostPopularBaseline`, `UserCFBaseline`, `ItemCFBaseline`, `SVDBaseline` | classic references |
 
 `WeightedSimilarity` blends five matrices built from the three tables:
@@ -119,15 +123,22 @@ negative.
 
 ## Benchmarks
 
-UCI Online Retail, per-customer time split (80 / 20), Precision / Recall /
-NDCG @ 10:
+UCI Online Retail, per-customer time split (80 / 20) into train / test, with
+the last 20% of each customer's training history held out again as a
+validation split.  Every config is scored on validation; the best config of
+each model class is refitted on the full training data and scored **once**
+on test.  Metrics: Precision / Recall / NDCG @ 10, plus catalogue coverage
+and the average popularity of recommended items.
 
 ```bash
-python -m benchmarks.run_benchmark
+python -m benchmarks.run_benchmark               # 4 parallel workers
+python -m benchmarks.run_benchmark --jobs 8 --include-bp
 ```
 
-Results are written to `benchmarks/results/` (CSV + best-per-model plot).
-Add configurations in `build_configs()` in `benchmarks/run_benchmark.py`.
+Results are written to `benchmarks/results/` (`validation_*.csv`,
+`test_*.csv` and a best-per-model plot).  Add configurations in
+`build_configs()` in `benchmarks/run_benchmark.py`.  The parsed Excel file is
+cached as `benchmarks/data/Online Retail.pkl`.
 
 ## Tests
 

@@ -124,33 +124,6 @@ class TestStrictGroups:
         rec_products = set(recs["product_id"])
         assert "p1" not in rec_products
 
-    def test_product_group_filtering(self):
-        customers = pd.DataFrame({
-            "customer_id": ["c0", "c1"],
-            "region": ["A", "A"],
-        })
-        products = pd.DataFrame({
-            "product_id": ["p0", "p1", "p2"],
-            "category": ["X", "X", "Y"],
-        })
-        interactions = pd.DataFrame({
-            "customer_id": ["c0", "c0", "c1", "c1"],
-            "product_id":  ["p0", "p2", "p0", "p1"],
-            "weight":      [1.0,  1.0,  1.0,  1.0],
-        })
-
-        # With product group filtering on category, p0-p2 link is cut
-        # (different categories), but p0-p1 link preserved (same category X)
-        model = BipartiteGraphRec(
-            hop_weights={3: 1.0},
-            product_group_cols=["category"],
-            top_k=10,
-        )
-        model.fit(customers, products, interactions)
-        # This mainly tests that it runs without error
-        recs = model.recommend(n=10)
-        assert isinstance(recs, pd.DataFrame)
-
     def test_strict_group_equals_zero_penalty(self, data):
         """A strict group is the same as a 0-penalty on that column."""
         customers, products, interactions = data
@@ -201,7 +174,7 @@ class TestSoftPenalties:
         customers, products, interactions = data
         model = BipartiteGraphRec(
             hop_weights={3: 1.0}, top_k=20,
-            product_penalties={"category": 0.5},
+            customer_penalties={"segment": 0.5},
         )
         model.fit(customers, products, interactions)
         recs = model.recommend(n=5)
@@ -300,3 +273,26 @@ class TestEdgeCases:
         model.fit(customers, products, interactions)
         recs = model.recommend(n=5)
         assert isinstance(recs, pd.DataFrame)
+
+
+class TestHopNormalization:
+    def test_row_normalised_hops_sum_to_weights(self, data):
+        customers, products, interactions = data
+        model = BipartiteGraphRec(
+            hop_weights={3: 1.0, 5: 0.25}, aggregation="count", top_k=20,
+            hop_normalization="row",
+        ).fit(customers, products, interactions)
+        totals = np.asarray(model._R.sum(axis=1)).ravel()
+        has_both = totals > 0
+        np.testing.assert_allclose(totals[has_both], 1.25, rtol=1e-5)
+
+    def test_default_is_unnormalised(self, data):
+        customers, products, interactions = data
+        a = BipartiteGraphRec(hop_weights={3: 1.0}, top_k=20).fit(customers, products, interactions)
+        b = BipartiteGraphRec(hop_weights={3: 1.0}, top_k=20, hop_normalization="none").fit(
+            customers, products, interactions)
+        assert (a._R != b._R).nnz == 0
+
+    def test_invalid_normalization_raises(self):
+        with pytest.raises(ValueError, match="hop_normalization"):
+            BipartiteGraphRec(hop_normalization="max")
